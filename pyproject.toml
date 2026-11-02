@@ -1,0 +1,25 @@
+# Tool configuration only - this app is not packaged/installed.
+[project]
+name = "kavdo"
+version = "0.1.0"
+description = "Desktop to-do list for Windows (PySide6), launched with an AutoHotkey F2 hotkey."
+requires-python = ">=3.12"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-include = ["*.pyw"]
+
+[tool.ruff.lint]
+# Correctness-focused: syntax errors, pyflakes (undefined names, unused
+# imports, ...) and bugbear. Style rules are deliberately left out so the
+# existing code doesn't need a churny reformat.
+select = ["E9", "F", "B"]
+ignore = [
+  "B905",  # zip() without strict= - not worth a sweep across existing code
+  "B007",  # unused loop variable - harmless, one existing occurrence
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
