@@ -8,6 +8,13 @@ closes the whole app completely (nothing keeps running in the background).
 Click selects a task, double-click edits it, Ctrl+Z undoes.
 Uses a real (hidden) Windows frame so Aero Snap / Win+arrows work.
 
+Home tab:
+  - Every window's tab row starts with a fixed Home tab (a small house).
+    It lists every open task that has a due date - from every tab in every
+    window - most urgent first (overdue first; on the same date starred
+    tasks first), each with its tab and group. Click one to jump to it.
+    Home can't be dragged, renamed or deleted, and isn't saved as a tab.
+
 Tabs and windows:
   - Each window shows a row of tabs along the top (each with a colour and
     a name), plus a '+' to add one; every tab is always visible somewhere -
@@ -2230,6 +2237,28 @@ def parse_task_shortcuts(text, group_names):
         if not changed:
             break
     return text, due, star, group
+def dated_tasks(tabs):
+    """Every open task with a due date, across the given tabs, most urgent
+    first - what the Home tab lists. `tabs` is an ordered list of
+    (tabid, tab_name, groups), groups being [(group_name, [task, ...]), ...]
+    in the same shape Board.export() and stored tab data use. Ordered by
+    due date (overdue first); on the same date starred tasks come first,
+    then tab order, group order and position within the group."""
+    out = []
+    for tab_pos, (tabid, tab_name, groups) in enumerate(tabs):
+        for group_pos, (group_name, tasks) in enumerate(groups):
+            for index, t in enumerate(tasks):
+                due = parse_due(t.get("due") or "")
+                if due is None or t.get("done"):
+                    continue
+                out.append({"text": t["text"], "due": t["due"], "star": bool(t.get("star")),
+                            "tabid": tabid, "tab": tab_name, "group": group_name,
+                            "index": index,
+                            "_key": (due, not t.get("star"), tab_pos, group_pos, index)})
+    out.sort(key=lambda e: e["_key"])
+    for e in out:
+        del e["_key"]
+    return out
 def group_as_list(group):
     """Open tasks as dash bullets, ready to paste into an email / Aconex.
     Extra lines of a task are indented under it."""
@@ -5421,6 +5450,8 @@ class TopBar(QWidget):
     def __init__(self, win):
         super().__init__(win)
         self.win = win
+        self.home_chip = HomeChip(self)
+        self.home_chip.clicked.connect(win.show_home)
         self.tab_scroll = TabScrollArea(self)
         self.tabbar = TabBar(self)
         self.tab_scroll.setWidget(self.tabbar)
@@ -5445,6 +5476,7 @@ class TopBar(QWidget):
         self.apply_scale()
     def apply_scale(self):
         self.setFixedHeight(int(34 * S))
+        self.home_chip.apply_scale()
         self.plus_btn.apply_scale()
         self.tabs_btn.apply_scale()
         for b in self.controls:
@@ -5462,7 +5494,8 @@ class TopBar(QWidget):
     def tab_top(self):
         return int(4 * S)
     def tab_left(self):
-        return MARGIN                  # tabs line up with the list's own left edge
+        # Home lines up with the list's own left edge; the tab row follows it.
+        return MARGIN + self.home_chip.width() + int(TAB_GAP_BASE * S)
     def caption_widgets(self):
         """What counts as empty bar space (window drag / double-click to
         maximise) rather than something clickable."""
@@ -5477,6 +5510,7 @@ class TopBar(QWidget):
             x -= b.width()
             b.move(x, 0)
         left, top = self.tab_left(), self.tab_top()
+        self.home_chip.setGeometry(MARGIN, top, self.home_chip.width(), h - top)
         avail = max(0, x - int(6 * S) - left - sp - self.plus_btn.width())
         overflow = self.tabbar.content_width(avail) > avail
         if overflow:
@@ -5737,6 +5771,7 @@ def global_save():
     if not ok:
         primary._report_save_failure()
         QTimer.singleShot(3000, primary.save_timer.start)
+    refresh_home_views()
     return ok
 def set_topbar_colour(colour):
     """Changes the shared top-bar background (behind the tabs) and repaints
@@ -5869,7 +5904,7 @@ class TabChip(QWidget):
     def meta(self):
         return self.bar.win.tab_meta.get(self.tabid, {"name": "Tab", "colour": ACCENT})
     def is_active(self):
-        return self.tabid == self.bar.win.active_tab
+        return self.tabid == self.bar.win.active_tab and not self.bar.win.home_active
     def apply_scale(self):
         self.font_ = F(10, bold=True)
     def ideal_width(self):
@@ -5973,6 +6008,230 @@ class TabChip(QWidget):
             self.bar.start_rename(self.tabid)
     def contextMenuEvent(self, e):
         self.bar.tab_context_menu(self.tabid, e.globalPos())
+# ------------------------------------------------------------------
+# HOME TAB (summary of dated tasks across every tab and window)
+# ------------------------------------------------------------------
+HOME_COLOUR = "#3d5a80"
+class HomeChip(QWidget):
+    """The fixed Home tab at the very start of every window's tab row. It
+    sits outside the scrolling row (TopBar places it), so it can't be
+    dragged, renamed, deleted or dropped onto, and never scrolls away.
+    Shows a small house; clicking it opens the window's Home view."""
+    clicked = Signal()
+    def __init__(self, top):
+        super().__init__(top)
+        self.top = top
+        self.win = top.win
+        self.hover = False
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Home")
+        self.apply_scale()
+    def apply_scale(self):
+        self.resize(int(36 * S), max(1, self.height()))
+    def is_active(self):
+        return getattr(self.win, "home_active", False)
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect())
+        if self.is_active():
+            fill = QBrush(self.win.list_gradient())
+            off = self.mapTo(self.win, QPoint(0, 0))
+            fill.setTransform(QTransform.fromTranslate(-off.x(), -off.y()))
+            p.fillPath(tab_shape(r, RADIUS), fill)
+            colour = TEXT
+        else:
+            path = QPainterPath()
+            path.addRoundedRect(r.adjusted(0, 0, 0, -int(TAB_INSET_BASE * S)), RADIUS, RADIUS)
+            p.fillPath(path, QColor(mix(TINT_BASE, HOME_COLOUR, 0.75 if self.hover else 0.55)))
+            colour = TEXT if self.hover else TEXT_SUB
+        # House: roof, walls and a door, on the same line as the tab names.
+        cx, cy, a = r.center().x(), r.center().y(), 5.5 * S
+        p.setPen(QPen(QColor(colour), 1.3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(Qt.NoBrush)
+        roof = QPainterPath()
+        roof.moveTo(cx - 1.1 * a, cy - 0.05 * a)
+        roof.lineTo(cx, cy - a)
+        roof.lineTo(cx + 1.1 * a, cy - 0.05 * a)
+        p.drawPath(roof)
+        body = QPainterPath()
+        body.moveTo(cx - 0.75 * a, cy - 0.35 * a)
+        body.lineTo(cx - 0.75 * a, cy + 0.9 * a)
+        body.lineTo(cx + 0.75 * a, cy + 0.9 * a)
+        body.lineTo(cx + 0.75 * a, cy - 0.35 * a)
+        p.drawPath(body)
+        door = QPainterPath()
+        door.moveTo(cx - 0.25 * a, cy + 0.9 * a)
+        door.lineTo(cx - 0.25 * a, cy + 0.3 * a)
+        door.lineTo(cx + 0.25 * a, cy + 0.3 * a)
+        door.lineTo(cx + 0.25 * a, cy + 0.9 * a)
+        p.drawPath(door)
+    def moveEvent(self, e):
+        super().moveEvent(e)
+        if self.is_active():
+            self.win.update()      # the window leaves a hole in the top strip for it
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self.is_active():
+            self.win.update()
+    def enterEvent(self, _):
+        self.hover = True
+        self.update()
+    def leaveEvent(self, _):
+        self.hover = False
+        self.update()
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.clicked.emit()
+class _HomeDelegate(QStyledItemDelegate):
+    """One dated task on Home: its text (starred ones with a star), and
+    underneath 'Tab > Group' and the due label in its due colour."""
+    def sizeHint(self, opt, index):
+        return QSize(opt.rect.width(), int(44 * S))
+    def paint(self, p, opt, index):
+        e = index.data(Qt.UserRole)
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(opt.rect).adjusted(2, 1, -2, -1)
+        if opt.state & QStyle.State_Selected:
+            p.setPen(QPen(QColor(ACCENT), 1))
+            p.setBrush(QColor(CARD_SELECTED))
+        elif opt.state & QStyle.State_MouseOver:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 255, 255, 22))
+        else:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 255, 255, 10))
+        p.drawRoundedRect(r, RADIUS, RADIUS)
+        pad = int(10 * S)
+        left = pad
+        if e["star"]:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(STAR_ON))
+            p.drawPath(star_path(r.left() + pad + 5 * S, r.top() + int(5 * S) + 8 * S, 5.5 * S))
+            left += int(16 * S)
+        fm = QFontMetrics(F(9.5))
+        p.setFont(F(9.5))
+        p.setPen(QColor(TEXT))
+        top = r.adjusted(left, int(5 * S), -pad, 0)
+        p.drawText(top, Qt.AlignLeft | Qt.AlignTop,
+                   fm.elidedText(e["text"].split("\n")[0], Qt.ElideRight, int(top.width())))
+        label, days = due_text(e["due"])
+        where = f"{e['tab']} › {e['group']}"
+        small = F(8)
+        sfm = QFontMetrics(small)
+        p.setFont(small)
+        bottom = r.adjusted(left, 0, -pad, -int(5 * S))
+        due_w = sfm.horizontalAdvance(label or "")
+        sep = "  ·  "
+        sep_w = sfm.horizontalAdvance(sep)
+        where_w = max(0, int(bottom.width()) - due_w - sep_w)
+        where = sfm.elidedText(where, Qt.ElideRight, where_w)
+        p.setPen(QColor(TEXT_SUB))
+        p.drawText(bottom, Qt.AlignLeft | Qt.AlignBottom, where + sep)
+        p.setPen(QColor(due_colour(days)))
+        p.drawText(bottom.adjusted(sfm.horizontalAdvance(where + sep), 0, 0, 0),
+                   Qt.AlignLeft | Qt.AlignBottom, label or "")
+        p.restore()
+class HomeView(QListWidget):
+    """What the window shows instead of its board while Home is open: every
+    open task with a due date, from every tab in every window, most urgent
+    first (see dated_tasks). Clicking one (or Enter) jumps to it in its own
+    tab. The board stays alive, just hidden, so saving etc. is unaffected."""
+    def __init__(self, win):
+        super().__init__(win)
+        self.win = win
+        self.setFrameShape(QFrame.NoFrame)
+        self.setItemDelegate(_HomeDelegate(self))
+        self.setMouseTracking(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollMode(QListWidget.ScrollPerPixel)
+        self.setStyleSheet("QListWidget { background: transparent; border: none; outline: none; }")
+        self.viewport().setAutoFillBackground(False)
+        self.verticalScrollBar().setStyleSheet(SCROLL_STYLE)
+        self.setSpacing(int(2 * S))
+        self.itemClicked.connect(self._open)
+        self.hide()
+    def rebuild(self):
+        bar = self.verticalScrollBar()
+        scroll, row = bar.value(), self.currentRow()
+        self.setViewportMargins(MARGIN - int(4 * S), int(8 * S), MARGIN - int(4 * S), int(8 * S))
+        self.clear()
+        for entry in dated_tasks(all_tabs_in_order()):
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, entry)
+            self.addItem(item)
+        if 0 <= row < self.count():
+            self.setCurrentRow(row)
+        bar.setValue(scroll)
+        self.viewport().update()
+    def _open(self, item):
+        if item is not None:
+            open_task(item.data(Qt.UserRole))
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self._open(self.currentItem())
+            return
+        super().keyPressEvent(e)
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if self.count() == 0:
+            p = QPainter(self.viewport())
+            p.setFont(F(9.5))
+            p.setPen(QColor(TEXT_SUB))
+            p.drawText(self.viewport().rect().adjusted(0, int(24 * S), 0, 0),
+                       Qt.AlignHCenter | Qt.AlignTop, "No tasks with a due date")
+def all_tabs_in_order():
+    """(tabid, tab_name, groups) for every tab in every window, in window
+    then tab-row order - the input dated_tasks() expects. The open tab is
+    read from its live board (alive even while Home is showing)."""
+    out = []
+    for w in WINDOWS:
+        for tid in w.tab_order:
+            if tid == w.active_tab and w.board is not None:
+                groups = w.board.export()[0]
+            else:
+                data = w.tab_data.get(tid) or (w.data if tid == w.active_tab else None)
+                groups = data["groups"] if data else []
+            out.append((tid, w.tab_meta.get(tid, {}).get("name", "Tab"), groups))
+    return out
+def refresh_home_views():
+    """Brings every window's Home list up to date - called after each save,
+    which every change (in any window) already passes through."""
+    for w in WINDOWS:
+        if getattr(w, "home_active", False):
+            w.home.rebuild()
+def open_task(entry):
+    """Jumps from a Home row to the task itself: brings its window forward,
+    opens its tab, unfolds its group if need be, selects it and scrolls to
+    it."""
+    w = next((w for w in WINDOWS if entry["tabid"] in w.tab_order), None)
+    if w is None or w.board is None:
+        return
+    bring_to_front(w)
+    if w.active_tab == entry["tabid"]:
+        w.leave_home()
+    else:
+        w.switch_tab(entry["tabid"])
+    board = w.board
+    group = next((g for g in board.groups if g.name == entry["group"]), None)
+    card = None
+    if group is not None and entry["index"] < len(group.cards):
+        c = group.cards[entry["index"]]
+        if c.task["text"] == entry["text"]:
+            card = c
+    if card is None:       # list moved on since Home was drawn - find it by content
+        card = next((c for c in board.open_cards() if c.task["text"] == entry["text"]
+                     and c.task.get("due") == entry["due"]), None)
+    if card is None:
+        return
+    group = board.group_of(card)
+    if group is not None and group.folded:
+        board.toggle_fold(group)
+    board.select_only(card)
+    board.kb_cursor = card
+    board.setFocus()
+    board.reveal_later(card)
 class TabGhost(QWidget):
     """Picture of a tab following the cursor once it's dragged out of its
     row - the only image shown (no OS drag cursor on top of it)."""
@@ -6492,6 +6751,7 @@ class Window(QWidget):
         # and snapping. _normal_geom is the last un-maximised geometry, the
         # one saved to file.
         self._normal_geom = None
+        self.home_active = False    # Home view showing (the board stays alive, hidden)
         # ---- figure out which tab(s) this window starts with ----
         if detached is not None:
             # Torn off a tab from another window: starts with just that one.
@@ -6550,6 +6810,8 @@ class Window(QWidget):
         self.scroll.viewport().setAutoFillBackground(False)
         self.scroll.verticalScrollBar().setStyleSheet(SCROLL_STYLE)
         layout.addWidget(self.scroll)
+        self.home = HomeView(self)          # shown instead of the board while Home is open
+        layout.addWidget(self.home)
         self.save_timer = QTimer(self)
         self.save_timer.setSingleShot(True)
         self.save_timer.setInterval(300)
@@ -6581,6 +6843,7 @@ class Window(QWidget):
         WINDOWS.append(self)
     # ---------- board ----------
     def build_board(self, data):
+        self.leave_home()            # a board being (re)built is always shown
         old = self.board
         if old is not None:
             old.dead = True
@@ -6605,6 +6868,10 @@ class Window(QWidget):
                 "colours": self.board.colours(), "collapsed": self.board.collapsed}
     # ---------- tabs ----------
     def switch_tab(self, tabid):
+        if self.home_active and tabid == self.active_tab and self.board is not None:
+            self.leave_home()        # back from Home to the tab that was open underneath
+            self.board.setFocus()
+            return
         if tabid == self.active_tab or self.board is None or tabid not in self.tab_order:
             return
         self.tabbar.commit_rename_if_open()
@@ -6625,6 +6892,32 @@ class Window(QWidget):
             general.add_row.edit.setFocus()
         self.tabbar.refresh()
         self.save_timer.start()
+    def show_home(self):
+        """Shows the Home view in place of the board. The open tab stays
+        open underneath (active_tab and board unchanged), so saving, moving
+        tabs etc. carry on exactly as before; clicking any tab leaves Home."""
+        if self.board is None:
+            return
+        if not self.home_active:
+            self.tabbar.commit_rename_if_open()
+            self.commit_edits()
+            self.home_active = True
+            self.scroll.hide()
+            self.home.show()
+            self.apply_tab_background(HOME_COLOUR)
+            self.bar.home_chip.update()
+            self.tabbar.refresh()
+        self.home.rebuild()
+        self.home.setFocus()
+    def leave_home(self):
+        if not self.home_active:
+            return
+        self.home_active = False
+        self.home.hide()
+        self.scroll.show()
+        self.apply_tab_background(self.tab_meta.get(self.active_tab, {}).get("colour"))
+        self.bar.home_chip.update()
+        self.tabbar.refresh()
     def add_tab(self):
         self.tabbar.commit_rename_if_open()
         tid = alloc_tab_id()
@@ -6873,6 +7166,8 @@ class Window(QWidget):
             self.today = date.today()
             self.board.refresh_dates()
             self.archive_old_everywhere()
+            if self.home_active:
+                self.home.rebuild()   # 'Due tomorrow' becomes 'Due today' etc.
     def load_board(self):
         self.build_board(self.data)
         self.data = None
@@ -6910,6 +7205,8 @@ class Window(QWidget):
         except Exception:
             pass
     def undo(self):
+        if self.home_active:
+            return                   # nothing on Home to undo
         if self.board is None or self._restore_deleted_tab() or not self.history:
             return
         top = self.history[-1]
@@ -7353,6 +7650,10 @@ class Window(QWidget):
         """(the open tab's body, its two flares) in window coordinates, cut
         to the visible part of the tab row - or None if it isn't in the row
         right now."""
+        if self.home_active:
+            home = self.bar.home_chip
+            r = QRectF(QRect(home.mapTo(self, QPoint(0, 0)), home.size()))
+            return tab_shape(r, RADIUS), tab_flares(r)
         chip = self.tabbar.chips.get(self.active_tab)
         if chip is None or chip.lifted or not chip.isVisible():
             return None

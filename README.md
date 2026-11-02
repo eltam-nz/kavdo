@@ -3,7 +3,8 @@
 A fast, keyboard-friendly to-do list for Windows in the style of Microsoft To Do,
 built with PySide6. Press **F2** to open it, **F2** again to save and close.
 
-Features include multiple windows and colour-coded tabs, groups, stars, due dates
+Features include a Home tab listing every dated task across all tabs, most urgent
+first; multiple windows and colour-coded tabs; groups, stars, due dates
 typed in plain English (`Call Bob fri`, `RFI by 5/4 !!`), links to files and
 folders, Outlook email/attachment drag-and-drop, an archive of completed tasks,
 and undo (Ctrl+Z). The docstring at the top of `TodoList.pyw` describes the
